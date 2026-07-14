@@ -1,5 +1,5 @@
-from abstract.geo import Router
-from config import Config
+from traffic.abstract.geo import Router
+from traffic.config import Config
 import click
 
 
@@ -39,12 +39,7 @@ def format_duration(seconds: float) -> str:
     return ", ".join(parts)
 
 
-@click.group()
-def cli():
-    pass
-
-
-@cli.group(invoke_without_command=True)
+@click.group(invoke_without_command=True)
 @click.option("--home", help="Starting postcode or address")
 @click.option("--destination", help="Ending postcode or address")
 @click.option("--no-motorways", is_flag=True, help="Avoid motorways")
@@ -96,4 +91,4 @@ def set(key, value):
 
 
 if __name__ == "__main__":
-    cli()
+    traffic()

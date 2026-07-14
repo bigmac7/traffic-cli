@@ -5,7 +5,7 @@ Get all of the geometric info, such as postcode  -> lat/long, etc
 from geopy.geocoders import Nominatim
 import routingpy
 from typing import Literal, List
-from config import Config
+from traffic.config import Config
 
 geocoder = Nominatim(user_agent="traffic")
 
