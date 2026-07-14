@@ -1,6 +1,6 @@
 [project]
 name = "traffic-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "CLI tool to calculate travel times using routing APIs"
 readme = "README.md"
 requires-python = ">=3.14"
