@@ -1,10 +1,18 @@
-# Python-generated files
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.py[oc]
-build/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
 dist/
-wheels/
-*.egg-info
-uv.lock
+build/
+*.egg-info/
+
 # Virtual environments
-.venv
+.venv/
+env/
+venv/
+
+# Cache & testing
+.pytest_cache/
+.ruff_cache/

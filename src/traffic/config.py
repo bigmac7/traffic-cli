@@ -16,6 +16,7 @@ class Config:
             self.provider_name = self.config.get("provider_name")
             self.api_key = self.config.get("api_key")
             self.profile = self.config.get("profile", "car")
+            self.country = self.config.get("country") or self.config.get("country_code")
 
             try:
                 self.router_class = self._get_router_class(self.provider_name)
@@ -28,6 +29,7 @@ class Config:
             self.provider_name = None
             self.api_key = None
             self.profile = None
+            self.country = None
             self.router_class = None
 
     def _get_router_class(self, provider_name):
@@ -66,6 +68,7 @@ class Config:
         self.provider_name = provider_name
         self.api_key = api_key
         self.profile = profile
+        self.country = None
         self.router_class = self._get_router_class(self.provider_name)
 
         self.save()
@@ -76,18 +79,40 @@ class Config:
         with open(self.config_file, "w") as f:
             json.dump(self.config, f, indent=4)
 
-    def add_var_to_config(self, key: str, value: str):
+    def set_config_value(self, key: str, value: str):
+        """Sets a configuration variable or system setting."""
         if not self.config:
             raise ValueError("Config not initialized. Run `init` first.")
 
-        self.config["vars"][key] = value
+        norm_key = key.lower()
+        if norm_key in ("profile", "default_profile"):
+            self.config["profile"] = value
+            self.profile = value
+            logger.info("Changed default profile to %s", value)
+        elif norm_key in ("country", "country_code", "cc"):
+            val = value.lower().strip()
+            if val == "uk":
+                val = "gb"
+            self.config["country"] = val
+            self.country = val
+            logger.info("Changed default country to %s", val)
+        elif norm_key == "api_key":
+            self.config["api_key"] = value
+            self.api_key = value
+        elif norm_key == "provider_name":
+            self.config["provider_name"] = value
+            self.provider_name = value
+            self.router_class = self._get_router_class(value)
+        else:
+            if "vars" not in self.config:
+                self.config["vars"] = {}
+            self.config["vars"][key] = value
+            logger.info("Added variable %s to config with value %s", key, value)
+
         self.save()
-        logger.info("Added variable %s to config with value %s", key, value)
+
+    def add_var_to_config(self, key: str, value: str):
+        self.set_config_value(key, value)
 
     def set_default_profile(self, profile: str):
-        if not self.config:
-            raise ValueError("Config not initialized. Run `init` first.")
-
-        self.config["profile"] = profile
-        self.save()
-        logger.info("Changed default profile to %s", profile)
+        self.set_config_value("profile", profile)

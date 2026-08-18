@@ -69,16 +69,39 @@ class Router:
 
         return tuple(resolved)
 
-    def _get_coords_from_query(self, query: str):
-        location = geocoder.geocode(query)  # see geopy examples
-        if not location:
-            raise ValueError(f"Co-ordinates for {query}")
-        return [location.longitude, location.latitude]
+    def _geocode_location(self, query: str, country_code: str = None):
+        """Geocodes a query string, applying country bias if configured."""
+        country = country_code or getattr(self.config, "country", None) or (self.config.config.get("country") if self.config.config else None)
+        if country:
+            cc = country.lower().strip()
+            if cc == "uk":
+                cc = "gb"
+            try:
+                location = geocoder.geocode(query, country_codes=cc)
+                if location:
+                    return location
+            except Exception:
+                pass
 
-    def get_travel_time(self, home: str, destination: str):
+        try:
+            location = geocoder.geocode(query)
+        except Exception as e:
+            raise ValueError(f"Geocoding service error while searching for '{query}': {e}")
+
+        if not location:
+            raise ValueError(f"Coordinates for '{query}' could not be found.")
+        return location
+
+    def get_travel_time(self, home: str, destination: str, country_code: str = None):
         home, destination = self.resolve_var(home, destination)
-        home_coords = self._get_coords_from_query(home)
-        destination_coords = self._get_coords_from_query(destination)
+        home_loc = self._geocode_location(home, country_code=country_code)
+        destination_loc = self._geocode_location(destination, country_code=country_code)
+
+        self.last_home_location = home_loc
+        self.last_destination_location = destination_loc
+
+        home_coords = [home_loc.longitude, home_loc.latitude]
+        destination_coords = [destination_loc.longitude, destination_loc.latitude]
         route = self.routing_client.directions(
             locations=[home_coords, destination_coords], profile=self.profile
         )
