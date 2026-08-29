@@ -336,6 +336,7 @@ class DefaultCommandGroup(click.Group):
 
 
 @click.group(cls=DefaultCommandGroup, default_cmd="route", invoke_without_command=True)
+@click.version_option(package_name="traffic-cli")
 @click.pass_context
 def traffic(ctx):
     """Calculates route and travel time between locations.
@@ -412,9 +413,8 @@ def route_cmd(
     if info and not is_headless:
         click.echo(info)
 
-    router = Router(config)
-
     try:
+        router = Router(config)
         duration = router.get_travel_time(origin, dest, country_code=country)
         home_addr = getattr(getattr(router, "last_home_location", None), "address", origin)
         dest_addr = getattr(getattr(router, "last_destination_location", None), "address", dest)

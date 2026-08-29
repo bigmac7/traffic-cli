@@ -53,7 +53,14 @@ class Router:
         if not provider_info:
             raise ValueError(f"Provider '{provider_name}' is not supported.")
 
-        self.profile = provider_info["profiles"][profile]
+        profiles = provider_info["profiles"]
+        if profile not in profiles:
+            valid = ", ".join(sorted(profiles))
+            raise ValueError(
+                f"Profile '{profile}' is not supported for provider '{provider_name}'. "
+                f"Valid profiles are: {valid}. Set one with `traffic set profile <profile>`."
+            )
+        self.profile = profiles[profile]
         self.routing_client = config.router_class(api_key=config.api_key)
 
     def resolve_var(self, *vars):
