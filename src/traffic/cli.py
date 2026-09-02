@@ -1,7 +1,7 @@
 import json
 import re
 import click
-from traffic.abstract.geo import Router, geocoder
+from traffic.abstract.geo import Router, geocode, normalize_country
 from traffic.config import Config
 
 
@@ -21,7 +21,10 @@ def get_initialized_config(headless: bool = False):
         )
         api_key = click.prompt("Please enter API key")
         profile = click.prompt("Please enter default profile", default="car")
-        config.initialise(provider_name, api_key, profile)
+        try:
+            config.initialise(provider_name, api_key, profile)
+        except ValueError as e:
+            raise click.ClickException(str(e))
         click.echo(f"Configuration initialised with provider: {provider_name}\n")
     return config
 
@@ -177,11 +180,8 @@ def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, coun
     Returns a tuple: (origin, destination, info_message, error_message).
     """
     vars_dict = config.config.get("vars", {}) if config and config.config else {}
-    cc = country_code or getattr(config, "country", None) or (config.config.get("country") if config and config.config else None)
-    if cc:
-        cc = cc.lower().strip()
-        if cc == "uk":
-            cc = "gb"
+    raw_cc = country_code or getattr(config, "country", None) or (config.config.get("country") if config and config.config else None)
+    cc = normalize_country(raw_cc)
 
     # Case 1: Both options provided explicitly
     if home_opt and dest_opt:
@@ -272,14 +272,14 @@ def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, coun
             loc_d = None
             if cc:
                 try:
-                    loc_h = geocoder.geocode(cand_h, country_codes=cc)
-                    loc_d = geocoder.geocode(cand_d, country_codes=cc)
+                    loc_h = geocode(cand_h, country_codes=cc)
+                    loc_d = geocode(cand_d, country_codes=cc)
                 except Exception:
                     pass
             if not loc_h:
-                loc_h = geocoder.geocode(cand_h)
+                loc_h = geocode(cand_h)
             if not loc_d:
-                loc_d = geocoder.geocode(cand_d)
+                loc_d = geocode(cand_d)
 
             if loc_h and loc_d:
                 imp_h = getattr(loc_h, "raw", {}).get("importance", 0.5)
@@ -336,6 +336,7 @@ class DefaultCommandGroup(click.Group):
 
 
 @click.group(cls=DefaultCommandGroup, default_cmd="route", invoke_without_command=True)
+@click.version_option(package_name="traffic-cli")
 @click.pass_context
 def traffic(ctx):
     """Calculates route and travel time between locations.
@@ -384,6 +385,14 @@ def route_cmd(
     is_headless = headless or json_output or compact or raw
     config = get_initialized_config(headless=is_headless)
 
+    effective_country = country or getattr(config, "country", None)
+    if effective_country and normalize_country(effective_country) is None and not is_headless:
+        click.echo(
+            f"Warning: could not interpret country '{effective_country}' as a country "
+            "or ISO code (e.g. 'gb', 'us', 'france') — searching without a country filter.",
+            err=True,
+        )
+
     origin, dest, info, err = resolve_locations(
         locations=locations,
         home_opt=home,
@@ -412,9 +421,8 @@ def route_cmd(
     if info and not is_headless:
         click.echo(info)
 
-    router = Router(config)
-
     try:
+        router = Router(config)
         duration = router.get_travel_time(origin, dest, country_code=country)
         home_addr = getattr(getattr(router, "last_home_location", None), "address", origin)
         dest_addr = getattr(getattr(router, "last_destination_location", None), "address", dest)
@@ -473,7 +481,10 @@ def route_cmd(
 def init(provider_name, api_key, profile):
     """Creates the initial config"""
     config = Config()
-    config.initialise(provider_name, api_key, profile)
+    try:
+        config.initialise(provider_name, api_key, profile)
+    except ValueError as e:
+        raise click.ClickException(str(e))
     click.echo(f"Initialised with {provider_name}")
 
 
@@ -483,7 +494,10 @@ def init(provider_name, api_key, profile):
 def set(key, value):
     """Sets a configuration variable or setting (e.g. country, profile, api_key, home)."""
     config = get_initialized_config()
-    config.set_config_value(key, value)
+    try:
+        config.set_config_value(key, value)
+    except ValueError as e:
+        raise click.ClickException(str(e))
     click.echo(f"Set {key} to {value}")
 
 
