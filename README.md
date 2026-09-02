@@ -90,12 +90,18 @@ traffic home work
 ### Country bias
 
 If a place name is ambiguous, bias geocoding to a country with `--country`
-(alias `--cc`), or set a default:
+(alias `--cc`), or set a default. You can pass an ISO code (`gb`), a country
+name (`france`), or a common alias (`uk`, `england`, `usa`):
 
 ```bash
 traffic --country gb birmingham coventry
+traffic --country england b46 b9
 traffic set country gb
 ```
+
+> **Tip:** short, bare UK outward codes like `b9` are ambiguous even within a
+> country (they also match B-roads). Use a full postcode (`B9 4AA`) or add a
+> town (`"B9, Birmingham"`) for a precise result.
 
 ### Output formats
 

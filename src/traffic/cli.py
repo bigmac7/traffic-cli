@@ -1,7 +1,7 @@
 import json
 import re
 import click
-from traffic.abstract.geo import Router, geocode
+from traffic.abstract.geo import Router, geocode, normalize_country
 from traffic.config import Config
 
 
@@ -180,11 +180,8 @@ def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, coun
     Returns a tuple: (origin, destination, info_message, error_message).
     """
     vars_dict = config.config.get("vars", {}) if config and config.config else {}
-    cc = country_code or getattr(config, "country", None) or (config.config.get("country") if config and config.config else None)
-    if cc:
-        cc = cc.lower().strip()
-        if cc == "uk":
-            cc = "gb"
+    raw_cc = country_code or getattr(config, "country", None) or (config.config.get("country") if config and config.config else None)
+    cc = normalize_country(raw_cc)
 
     # Case 1: Both options provided explicitly
     if home_opt and dest_opt:
@@ -387,6 +384,14 @@ def route_cmd(
     """Calculates route and travel time between locations."""
     is_headless = headless or json_output or compact or raw
     config = get_initialized_config(headless=is_headless)
+
+    effective_country = country or getattr(config, "country", None)
+    if effective_country and normalize_country(effective_country) is None and not is_headless:
+        click.echo(
+            f"Warning: could not interpret country '{effective_country}' as a country "
+            "or ISO code (e.g. 'gb', 'us', 'france') — searching without a country filter.",
+            err=True,
+        )
 
     origin, dest, info, err = resolve_locations(
         locations=locations,
