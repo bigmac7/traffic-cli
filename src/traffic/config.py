@@ -3,6 +3,8 @@ from pathlib import Path
 import logging
 import routingpy
 
+from traffic.providers import resolve_provider, supported_providers
+
 logger = logging.getLogger(__name__)
 CONFIG_DIR = Path.home() / ".traffic"
 
@@ -18,12 +20,7 @@ class Config:
             self.profile = self.config.get("profile", "car")
             self.country = self.config.get("country") or self.config.get("country_code")
 
-            try:
-                self.router_class = self._get_router_class(self.provider_name)
-            except AttributeError:
-                raise ValueError(
-                    f"Provider {self.provider_name} is not part of the supported list."
-                )
+            self.router_class = self._get_router_class(self.provider_name)
         else:
             logger.warning("Config has not been initialised - init script must be ran")
             self.provider_name = None
@@ -35,18 +32,14 @@ class Config:
     def _get_router_class(self, provider_name):
         if not provider_name:
             return None
-        name_lower = provider_name.lower()
-        if name_lower == "mapbox":
-            target = "mapboxosrm"
-        elif name_lower == "google_maps":
-            target = "google"
-        else:
-            target = name_lower
-        class_name = next(
-            (attr for attr in dir(routingpy) if attr.lower() == target),
-            provider_name
-        )
-        return getattr(routingpy, class_name)
+        _, info = resolve_provider(provider_name)
+        if not info:
+            supported = ", ".join(supported_providers())
+            raise ValueError(
+                f"Provider '{provider_name}' is not supported. "
+                f"Supported providers: {supported}."
+            )
+        return getattr(routingpy, info["class_name"])
 
     def _load_config(self):
         """Safely loads the config file if it exists."""
@@ -56,7 +49,25 @@ class Config:
         return {}
 
     def initialise(self, provider_name, api_key, profile):
-        """Creates the initial config.json from CLI arguments."""
+        """Creates the initial config.json from CLI arguments.
+
+        Validates the provider (and profile) up front so an unsupported choice
+        fails at `traffic init` time rather than later when routing runs.
+        """
+        _, info = resolve_provider(provider_name)
+        if not info:
+            supported = ", ".join(supported_providers())
+            raise ValueError(
+                f"Provider '{provider_name}' is not supported. "
+                f"Supported providers: {supported}."
+            )
+        if profile not in info["profiles"]:
+            valid = ", ".join(sorted(info["profiles"]))
+            raise ValueError(
+                f"Profile '{profile}' is not supported for provider '{provider_name}'. "
+                f"Valid profiles are: {valid}."
+            )
+
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         self.config = {
             "provider_name": provider_name,

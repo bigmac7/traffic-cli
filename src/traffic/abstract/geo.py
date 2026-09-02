@@ -3,39 +3,40 @@ Get all of the geometric info, such as postcode  -> lat/long, etc
 """
 
 from geopy.geocoders import Nominatim
-import routingpy
-from typing import Literal, List
+from geopy.extra.rate_limiter import RateLimiter
 from traffic.config import Config
+from traffic.providers import resolve_provider
 
-geocoder = Nominatim(user_agent="traffic")
+# Nominatim's usage policy requires a descriptive user agent (app + contact)
+# and limits anonymous use to ~1 request/second. We honour both below.
+geocoder = Nominatim(user_agent="traffic-cli (+https://github.com/bigmac7/traffic-cli)")
+
+# Rate-limit outbound geocode calls to stay within Nominatim's ~1 req/sec policy.
+_rate_limited_geocode = RateLimiter(geocoder.geocode, min_delay_seconds=1.0)
+
+# Cache results for the lifetime of a single CLI invocation so the heuristic
+# route-splitting in the CLI and the endpoint lookups in Router don't re-query
+# the same string. Keyed by (normalised query, country_codes).
+_geocode_cache: dict = {}
 
 
-provider_map: dict = {
-    "ors": {
-        "class_name": "ORS",
-        "profiles": {"bike": "cycling-regular", "car": "driving-car", "walk": "foot-walking"},
-    },
-    "graphhopper": {
-        "class_name": "Graphhopper",
-        "profiles": {"bike": "bike", "car": "car", "walk": "foot"},
-    },
-    "mapbox": {
-        "class_name": "MapboxOSRM",
-        "profiles": {"bike": "cycling", "car": "driving", "walk": "walking"},
-    },
-    "google_maps": {
-        "class_name": "Google",
-        "profiles": {"bike": "bicycling", "car": "driving", "walk": "walking"},
-    },
-    "tomtom": {
-        "class_name": "TomTom",
-        "profiles": {
-            "bike": "bicycle",
-            "car": "car",
-            "walk": "pedestrian",
-        },
-    },
-}
+def geocode(query, country_codes=None):
+    """Geocode a query with in-process caching and Nominatim rate limiting.
+
+    Returns the geopy ``Location`` (or ``None`` if not found). Results,
+    including misses, are cached per invocation to avoid redundant requests.
+    """
+    if not query:
+        return None
+    key = (query.strip().lower(), country_codes)
+    if key in _geocode_cache:
+        return _geocode_cache[key]
+    if country_codes:
+        location = _rate_limited_geocode(query, country_codes=country_codes)
+    else:
+        location = _rate_limited_geocode(query)
+    _geocode_cache[key] = location
+    return location
 
 
 class Router:
@@ -46,10 +47,7 @@ class Router:
         if not provider_name:
             raise ValueError("Provider name not set in config.")
         
-        provider_info = next(
-            (v for k, v in provider_map.items() if k.lower() == provider_name.lower() or v.get("class_name", "").lower() == provider_name.lower()),
-            None
-        )
+        _, provider_info = resolve_provider(provider_name)
         if not provider_info:
             raise ValueError(f"Provider '{provider_name}' is not supported.")
 
@@ -84,14 +82,14 @@ class Router:
             if cc == "uk":
                 cc = "gb"
             try:
-                location = geocoder.geocode(query, country_codes=cc)
+                location = geocode(query, country_codes=cc)
                 if location:
                     return location
             except Exception:
                 pass
 
         try:
-            location = geocoder.geocode(query)
+            location = geocode(query)
         except Exception as e:
             raise ValueError(f"Geocoding service error while searching for '{query}': {e}")
 

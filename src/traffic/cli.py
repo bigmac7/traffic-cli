@@ -1,7 +1,7 @@
 import json
 import re
 import click
-from traffic.abstract.geo import Router, geocoder
+from traffic.abstract.geo import Router, geocode
 from traffic.config import Config
 
 
@@ -21,7 +21,10 @@ def get_initialized_config(headless: bool = False):
         )
         api_key = click.prompt("Please enter API key")
         profile = click.prompt("Please enter default profile", default="car")
-        config.initialise(provider_name, api_key, profile)
+        try:
+            config.initialise(provider_name, api_key, profile)
+        except ValueError as e:
+            raise click.ClickException(str(e))
         click.echo(f"Configuration initialised with provider: {provider_name}\n")
     return config
 
@@ -272,14 +275,14 @@ def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, coun
             loc_d = None
             if cc:
                 try:
-                    loc_h = geocoder.geocode(cand_h, country_codes=cc)
-                    loc_d = geocoder.geocode(cand_d, country_codes=cc)
+                    loc_h = geocode(cand_h, country_codes=cc)
+                    loc_d = geocode(cand_d, country_codes=cc)
                 except Exception:
                     pass
             if not loc_h:
-                loc_h = geocoder.geocode(cand_h)
+                loc_h = geocode(cand_h)
             if not loc_d:
-                loc_d = geocoder.geocode(cand_d)
+                loc_d = geocode(cand_d)
 
             if loc_h and loc_d:
                 imp_h = getattr(loc_h, "raw", {}).get("importance", 0.5)
@@ -473,7 +476,10 @@ def route_cmd(
 def init(provider_name, api_key, profile):
     """Creates the initial config"""
     config = Config()
-    config.initialise(provider_name, api_key, profile)
+    try:
+        config.initialise(provider_name, api_key, profile)
+    except ValueError as e:
+        raise click.ClickException(str(e))
     click.echo(f"Initialised with {provider_name}")
 
 
@@ -483,7 +489,10 @@ def init(provider_name, api_key, profile):
 def set(key, value):
     """Sets a configuration variable or setting (e.g. country, profile, api_key, home)."""
     config = get_initialized_config()
-    config.set_config_value(key, value)
+    try:
+        config.set_config_value(key, value)
+    except ValueError as e:
+        raise click.ClickException(str(e))
     click.echo(f"Set {key} to {value}")
 
 
