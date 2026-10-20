@@ -145,16 +145,19 @@ class Router:
         return location
 
     def get_travel_time(self, home: str, destination: str, country_code: str = None):
-        home, destination = self.resolve_var(home, destination)
-        home_loc = self._geocode_location(home, country_code=country_code)
-        destination_loc = self._geocode_location(destination, country_code=country_code)
+        return self.get_route_time([home, destination], country_code=country_code)
 
-        self.last_home_location = home_loc
-        self.last_destination_location = destination_loc
+    def get_route_time(self, stops, country_code: str = None):
+        """Returns the total travel time (seconds) visiting ``stops`` in order."""
+        if len(stops) < 2:
+            raise ValueError("A route needs at least an origin and a destination.")
+        resolved = [self.resolve_var(stop) for stop in stops]
+        locations = [self._geocode_location(q, country_code=country_code) for q in resolved]
 
-        home_coords = [home_loc.longitude, home_loc.latitude]
-        destination_coords = [destination_loc.longitude, destination_loc.latitude]
-        route = self.routing_client.directions(
-            locations=[home_coords, destination_coords], profile=self.profile
-        )
+        self.last_locations = locations
+        self.last_home_location = locations[0]
+        self.last_destination_location = locations[-1]
+
+        coords = [[loc.longitude, loc.latitude] for loc in locations]
+        route = self.routing_client.directions(locations=coords, profile=self.profile)
         return route.duration

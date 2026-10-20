@@ -64,6 +64,7 @@ traffic set profile bike
 ```bash
 traffic <origin> <destination>
 traffic <origin> to <destination>
+traffic <origin> to <stop> to <stop> to <destination>
 ```
 
 Examples:
@@ -73,9 +74,33 @@ traffic california nevada
 traffic "las vegas" california
 traffic las vegas to california
 traffic home work                  # using saved variables (see below)
+traffic home to school to work     # multiple stops
 traffic --country gb b46 cv7       # bias geocoding to a country
 traffic --home London --destination Paris
 ```
+
+### Multiple stops
+
+Chain as many stops as you like with `to` (or `->`). They are visited in
+order, and the total travel time for the whole trip is reported:
+
+```console
+$ traffic london to oxford to bath to bristol
+From: london (London, Greater London, England, United Kingdom)
+Via:  oxford (Oxford, Oxfordshire, England, United Kingdom)
+Via:  bath (Bath, Bath and North East Somerset, England, United Kingdom)
+To:   bristol (City of Bristol, England, United Kingdom)
+Travel time: 3 hours, 5 mins
+```
+
+You can also add intermediate stops with the repeatable `--via` / `-v` option:
+
+```bash
+traffic home work --via school --via gym
+```
+
+With `--json`, the output includes a `stops` list of every stop and its
+resolved address.
 
 ### Saved variables
 
