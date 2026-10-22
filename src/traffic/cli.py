@@ -372,6 +372,7 @@ Examples:
   traffic home work
   traffic --country gb b46 cv7
   traffic --json home work
+  traffic --json --legs home to school to work
   traffic --headless --compact home work
   traffic --home London --destination Paris
 """
@@ -391,6 +392,10 @@ Examples:
 @click.option("--json", "json_output", is_flag=True, help="Output result in JSON format (Waybar compatible)")
 @click.option("--compact", "-c", is_flag=True, help="Output compact duration (e.g. '1h 15m')")
 @click.option("--raw", "--seconds", is_flag=True, help="Output raw duration in seconds")
+@click.option(
+    "--legs", "-l", "show_legs", is_flag=True,
+    help="Per-leg breakdown: one line per leg with --raw/--compact/--headless; leg times as the --json text",
+)
 @click.pass_context
 def route_cmd(
     ctx,
@@ -405,6 +410,7 @@ def route_cmd(
     json_output,
     compact,
     raw,
+    show_legs,
 ):
     """Calculates route and travel time between locations."""
     is_headless = headless or json_output or compact or raw
@@ -455,17 +461,32 @@ def route_cmd(
         resolved_h, resolved_d = resolved[0], resolved[-1]
         home_addr, dest_addr = addresses[0], addresses[-1]
         via_lines = [f"Via:  {r} ({a})" for r, a in zip(resolved[1:-1], addresses[1:-1])]
+        legs = [
+            {
+                "from": resolved[i],
+                "to": resolved[i + 1],
+                "duration_seconds": int(leg),
+                "formatted": format_duration(leg),
+                "compact": format_duration_compact(leg),
+            }
+            for i, leg in enumerate(router.last_leg_durations)
+        ]
+        breakdown_lines = [f"  {leg['from']} -> {leg['to']}: {leg['formatted']}" for leg in legs]
 
         if json_output:
             formatted = format_duration(duration)
             compact_fmt = format_duration_compact(duration)
-            tooltip = "\n".join(
-                [f"From: {resolved_h} ({home_addr})", *via_lines, f"To: {resolved_d} ({dest_addr})", f"Travel time: {formatted}"]
-            )
+            tooltip_lines = [f"From: {resolved_h} ({home_addr})", *via_lines, f"To: {resolved_d} ({dest_addr})"]
+            if len(legs) > 1:
+                tooltip_lines += ["", *[f"{leg['from']} -> {leg['to']}: {leg['formatted']}" for leg in legs], ""]
+            tooltip_lines.append(f"Travel time: {formatted}")
+            text = compact_fmt
+            if show_legs and len(legs) > 1:
+                text = " → ".join(leg["compact"] for leg in legs)
             output_data = {
-                "text": compact_fmt,
+                "text": text,
                 "alt": "traffic",
-                "tooltip": tooltip,
+                "tooltip": "\n".join(tooltip_lines),
                 "class": "traffic",
                 "duration_seconds": int(duration),
                 "formatted": formatted,
@@ -475,19 +496,28 @@ def route_cmd(
                 "destination": resolved_d,
                 "destination_address": dest_addr,
                 "stops": [{"name": r, "address": a} for r, a in zip(resolved, addresses)],
+                "legs": legs,
             }
             click.echo(json.dumps(output_data))
         elif raw:
-            click.echo(int(duration))
+            for value in [leg["duration_seconds"] for leg in legs] if show_legs else [int(duration)]:
+                click.echo(value)
         elif compact:
-            click.echo(format_duration_compact(duration))
+            for value in [leg["compact"] for leg in legs] if show_legs else [format_duration_compact(duration)]:
+                click.echo(value)
         elif headless:
-            click.echo(format_duration(duration))
+            for value in [leg["formatted"] for leg in legs] if show_legs else [format_duration(duration)]:
+                click.echo(value)
         else:
             click.echo(f"From: {resolved_h} ({home_addr})")
             for line in via_lines:
                 click.echo(line)
             click.echo(f"To:   {resolved_d} ({dest_addr})")
+            if len(legs) > 1:
+                click.echo("")
+                for line in breakdown_lines:
+                    click.echo(line)
+                click.echo("")
             click.echo(f"Travel time: {format_duration(duration)}")
     except Exception as e:
         error_msg = format_error_message(e)

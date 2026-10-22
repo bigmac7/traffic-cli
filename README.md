@@ -82,15 +82,18 @@ traffic --home London --destination Paris
 ### Multiple stops
 
 Chain as many stops as you like with `to` (or `->`). They are visited in
-order, and the total travel time for the whole trip is reported:
+order, and you get a per-leg breakdown plus the total for the whole trip:
 
 ```console
-$ traffic london to oxford to bath to bristol
-From: london (London, Greater London, England, United Kingdom)
-Via:  oxford (Oxford, Oxfordshire, England, United Kingdom)
-Via:  bath (Bath, Bath and North East Somerset, England, United Kingdom)
-To:   bristol (City of Bristol, England, United Kingdom)
-Travel time: 3 hours, 5 mins
+$ traffic home to school to work
+From: home (...)
+Via:  school (...)
+To:   work (...)
+
+  home -> school: 12 mins
+  school -> work: 25 mins
+
+Travel time: 37 mins
 ```
 
 You can also add intermediate stops with the repeatable `--via` / `-v` option:
@@ -99,8 +102,34 @@ You can also add intermediate stops with the repeatable `--via` / `-v` option:
 traffic home work --via school --via gym
 ```
 
-With `--json`, the output includes a `stops` list of every stop and its
-resolved address.
+#### Per-leg output for scripts
+
+Add `--legs` / `-l` to get one line per leg instead of the total:
+
+```console
+$ traffic --raw --legs home to school to work
+720
+1500
+$ traffic --compact --legs home to school to work
+12m
+25m
+```
+
+With `--json`, the output always includes a `stops` list (each stop and its
+resolved address) and a `legs` list:
+
+```json
+"legs": [
+  {"from": "home", "to": "school", "duration_seconds": 720, "formatted": "12 mins", "compact": "12m"},
+  {"from": "school", "to": "work", "duration_seconds": 1500, "formatted": "25 mins", "compact": "25m"}
+]
+```
+
+The leg breakdown also goes in the tooltip. `--json --legs` replaces the
+total in `text` with the leg times, e.g. `12m → 25m`.
+
+Leg times come from the same single routing request when the provider returns
+them. If it doesn't, each leg is requested separately.
 
 ### Saved variables
 
@@ -137,6 +166,7 @@ traffic set country gb
 | `--raw` / `--seconds` | Raw duration in seconds                                       |
 | `--json`              | JSON object (Waybar-compatible)                              |
 | `--headless` / `-q`   | Suppresses tips; prints a clean duration (good for scripts)  |
+| `--legs` / `-l`       | One line per leg (with `--raw`/`--compact`/`--headless`); leg times as the `--json` text |
 
 Routing options:
 
@@ -157,6 +187,10 @@ The `--json` output is designed to drop straight into a
     "interval": 300
 }
 ```
+
+For a multi-stop commute, `"exec": "traffic --json --legs home to school to work"`
+shows each leg in the bar (`12m → 25m`), with the full breakdown and total in
+the tooltip.
 
 ## Commands
 
