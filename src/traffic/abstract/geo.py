@@ -177,6 +177,47 @@ def normalize_country(value):
     return code
 
 
+# GraphHopper instruction signs marking the end of a leg.
+_GH_VIA_REACHED = 5
+_GH_FINISH = 4
+
+
+def extract_leg_durations(raw, leg_count):
+    """Pulls per-leg durations (seconds) out of a provider's raw directions response.
+
+    Handles ORS (geojson and json), Mapbox/OSRM, Google and GraphHopper shapes.
+    Returns ``None`` if the response doesn't carry a breakdown with exactly
+    ``leg_count`` legs.
+    """
+    if not isinstance(raw, dict):
+        return None
+    legs = None
+    try:
+        if raw.get("features"):  # ORS geojson
+            legs = [seg["duration"] for seg in raw["features"][0]["properties"]["segments"]]
+        elif raw.get("paths"):  # GraphHopper
+            legs, current = [], 0.0
+            for instruction in raw["paths"][0]["instructions"]:
+                current += instruction["time"] / 1000
+                if instruction["sign"] in (_GH_VIA_REACHED, _GH_FINISH):
+                    legs.append(current)
+                    current = 0.0
+        elif raw.get("routes"):
+            route = raw["routes"][0]
+            if "segments" in route:  # ORS json
+                legs = [seg["duration"] for seg in route["segments"]]
+            elif "legs" in route:  # Mapbox/OSRM, Google
+                legs = [
+                    leg["duration"]["value"] if isinstance(leg["duration"], dict) else leg["duration"]
+                    for leg in route["legs"]
+                ]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if legs is None or len(legs) != leg_count:
+        return None
+    return [float(d) for d in legs]
+
+
 class Router:
     def __init__(self, config: Config, traffic: bool = True, avoid_motorways: bool = False, avoid_tolls: bool = False):
         self.config = config
@@ -247,37 +288,52 @@ class Router:
         return location
 
     def get_travel_time(self, home: str, destination: str, country_code: str = None):
-        """Return the travel time in seconds.
+        return self.get_route_time([home, destination], country_code=country_code)
 
-        Also sets ``traffic_aware`` and ``free_flow_duration`` (``None`` unless
-        the provider reported a duration without traffic alongside it).
+    def get_route_time(self, stops, country_code: str = None):
+        """Return the total travel time in seconds, visiting ``stops`` in order.
+
+        Also sets ``last_leg_durations`` (empty if the response had no
+        per-leg breakdown), ``traffic_aware`` and
+        ``free_flow_duration`` (``None`` unless the provider reported a
+        duration without traffic alongside it).
         """
-        home, destination = self.resolve_var(home, destination)
-        home_loc = self._geocode_location(home, country_code=country_code)
-        destination_loc = self._geocode_location(destination, country_code=country_code)
+        if len(stops) < 2:
+            raise TrafficError("A route needs at least an origin and a destination.", "usage")
+        resolved = [self.resolve_var(stop) for stop in stops]
+        locations = [self._geocode_location(q, country_code=country_code) for q in resolved]
 
-        self.last_home_location = home_loc
-        self.last_destination_location = destination_loc
+        self.last_locations = locations
+        self.last_home_location = locations[0]
+        self.last_destination_location = locations[-1]
 
-        home_coords = [home_loc.longitude, home_loc.latitude]
-        destination_coords = [destination_loc.longitude, destination_loc.latitude]
-        kwargs = {"locations": [home_coords, destination_coords], "profile": self.profile, **self.avoid}
+        coords = [[loc.longitude, loc.latitude] for loc in locations]
+        kwargs = {"profile": self.profile, **self.avoid}
         traffic = self.traffic or {}
         if "profile" in traffic:
             kwargs["profile"] = traffic["profile"]
         if traffic.get("departure_time"):
             kwargs["departure_time"] = int(time.time())
 
-        route = self.routing_client.directions(**kwargs)
+        route = self.routing_client.directions(locations=coords, **kwargs)
         self.traffic_aware = "profile" in traffic
         self.free_flow_duration = None
+        duration = route.duration
+        legs = extract_leg_durations(getattr(route, "raw", None), len(coords) - 1)
 
         if traffic.get("departure_time"):
             # routingpy sums leg["duration"] (no traffic); Google puts the
-            # traffic-aware figure in leg["duration_in_traffic"].
-            legs = route.raw["routes"][0]["legs"]
-            if legs and all("duration_in_traffic" in leg for leg in legs):
+            # traffic-aware figure in leg["duration_in_traffic"], and omits it
+            # when the route has intermediate stops.
+            raw_legs = route.raw["routes"][0]["legs"]
+            if raw_legs and all("duration_in_traffic" in leg for leg in raw_legs):
                 self.traffic_aware = True
-                self.free_flow_duration = route.duration
-                return sum(leg["duration_in_traffic"]["value"] for leg in legs)
-        return route.duration
+                self.free_flow_duration = duration
+                legs = [float(leg["duration_in_traffic"]["value"]) for leg in raw_legs]
+                duration = sum(legs)
+
+        if len(coords) == 2:
+            legs = [float(duration)]
+        # Every provider returns legs; re-routing each leg would multiply the cost.
+        self.last_leg_durations = legs or []
+        return duration

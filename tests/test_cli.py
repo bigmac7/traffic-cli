@@ -359,3 +359,86 @@ def test_avoid_ignored_off_car_and_include_tolls_is_noop(env):
     code, out = run_json(env, "--include-tolls", "birmingham", "london")
     assert code == 0
     assert "options" not in FakeClient.calls[1]
+
+
+# --- multi-stop routes ------------------------------------------------------------
+
+COVENTRY = Location("Coventry, UK", (52.4068, -1.5197), {"importance": 0.7})
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"features": [{"properties": {"segments": [{"duration": 600}, {"duration": 900}]}}]},  # ORS geojson
+        {"routes": [{"segments": [{"duration": 600}, {"duration": 900}]}]},  # ORS json
+        {"routes": [{"legs": [{"duration": 600}, {"duration": 900}]}]},  # Mapbox
+        {"routes": [{"legs": [{"duration": {"value": 600}}, {"duration": {"value": 900}}]}]},  # Google
+        {"paths": [{"instructions": [  # GraphHopper: sign 5 = via reached, 4 = finish
+            {"time": 200000, "sign": 0}, {"time": 400000, "sign": 5}, {"time": 900000, "sign": 4},
+        ]}]},
+    ],
+)
+def test_extract_leg_durations(raw):
+    assert geo.extract_leg_durations(raw, 2) == [600.0, 900.0]
+    assert geo.extract_leg_durations(raw, 3) is None
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("birmingham to coventry to london",),
+        ("birmingham", "to", "coventry", "->", "london"),
+        ("birmingham", "london", "--via", "coventry"),
+    ],
+)
+def test_multi_stop_single_request(env, monkeypatch, args):
+    monkeypatch.setitem(PLACES, "coventry", COVENTRY)
+    env.configure("mapbox")
+    FakeClient.result = SimpleNamespace(duration=1500, raw={"routes": [{"legs": [{"duration": 600}, {"duration": 900}]}]})
+    code, out = run_json(env, "--no-motorways", *args)
+    assert code == 0
+    assert len(FakeClient.calls) == 1
+    call = FakeClient.calls[0]
+    assert call["locations"] == [[-1.8904, 52.4862], [-1.5197, 52.4068], [-0.1276, 51.5072]]
+    assert (call["profile"], call["exclude"]) == ("driving-traffic", "motorway")
+    assert [s["name"] for s in out["stops"]] == ["birmingham", "coventry", "london"]
+    assert out["stops"][1]["coords"] == [52.4068, -1.5197]
+    assert [leg["duration_seconds"] for leg in out["legs"]] == [600, 900]
+    assert out["duration_seconds"] == 1500
+    assert out["traffic_aware"] is True
+
+
+def test_legs_flag_outputs(env, monkeypatch):
+    monkeypatch.setitem(PLACES, "coventry", COVENTRY)
+    env.configure("mapbox")
+    FakeClient.result = SimpleNamespace(duration=1500, raw={"routes": [{"legs": [{"duration": 600}, {"duration": 900}]}]})
+    assert env.run("--raw", "--legs", "birmingham to coventry to london").stdout == "600\n900\n"
+    code, out = run_json(env, "--legs", "birmingham to coventry to london")
+    assert out["text"] == "10m → 15m"
+    assert "Via:" in env.run("birmingham to coventry to london").stdout
+
+
+def test_google_single_leg_uses_traffic_duration(env):
+    env.configure("google_maps")
+    FakeClient.result = SimpleNamespace(duration=3000, raw=GOOGLE_RAW)
+    code, out = run_json(env, "birmingham", "london")
+    assert [leg["duration_seconds"] for leg in out["legs"]] == [4000]
+
+
+def test_google_multi_stop_has_no_live_traffic(env, monkeypatch):
+    monkeypatch.setitem(PLACES, "coventry", COVENTRY)
+    env.configure("google_maps")
+    raw = {"routes": [{"legs": [{"duration": {"value": 600}}, {"duration": {"value": 900}}]}]}
+    FakeClient.result = SimpleNamespace(duration=1500, raw=raw)
+    code, out = run_json(env, "birmingham to coventry to london")
+    assert out["traffic_aware"] is False
+    assert [leg["duration_seconds"] for leg in out["legs"]] == [600, 900]
+
+
+def test_missing_breakdown_makes_no_extra_requests(env, monkeypatch):
+    monkeypatch.setitem(PLACES, "coventry", COVENTRY)
+    env.configure("ors")
+    code, out = run_json(env, "birmingham to coventry to london")
+    assert len(FakeClient.calls) == 1
+    assert out["legs"] == []
+    assert out["duration_seconds"] == 3600
