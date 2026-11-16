@@ -10,6 +10,10 @@ Each entry maps a canonical key to:
   - ``class_name``: the ``routingpy`` client class to instantiate.
   - ``aliases``: alternative names accepted from the user (case-insensitive).
   - ``profiles``: generic profile name -> provider-specific profile string.
+  - ``traffic``: how to get live-traffic durations for the ``car`` profile, or
+    ``None`` if the provider has none. Either ``{"profile": <car profile>}``
+    (a traffic-aware profile) or ``{"departure_time": True}`` (pass the current
+    time and read ``duration_in_traffic`` from the Google legs).
 """
 
 PROVIDERS: dict = {
@@ -17,21 +21,25 @@ PROVIDERS: dict = {
         "class_name": "ORS",
         "aliases": ("openrouteservice",),
         "profiles": {"bike": "cycling-regular", "car": "driving-car", "walk": "foot-walking"},
+        "traffic": None,
     },
     "graphhopper": {
         "class_name": "Graphhopper",
         "aliases": (),
         "profiles": {"bike": "bike", "car": "car", "walk": "foot"},
+        "traffic": None,
     },
     "mapbox": {
         "class_name": "MapboxOSRM",
         "aliases": ("mapboxosrm",),
         "profiles": {"bike": "cycling", "car": "driving", "walk": "walking"},
+        "traffic": {"profile": "driving-traffic"},
     },
     "google_maps": {
         "class_name": "Google",
         "aliases": ("google", "googlemaps"),
         "profiles": {"bike": "bicycling", "car": "driving", "walk": "walking"},
+        "traffic": {"departure_time": True},
     },
 }
 
@@ -55,3 +63,21 @@ def resolve_provider(name):
 def supported_providers():
     """Return the sorted list of canonical provider names, for error messages."""
     return sorted(PROVIDERS)
+
+
+def avoid_kwargs(key, motorways=False, tolls=False):
+    """``directions()`` kwargs that make provider ``key`` avoid motorways and/or tolls."""
+    if not (motorways or tolls):
+        return {}
+    if key == "ors":
+        features = ["highways"] * motorways + ["tollways"] * tolls
+        return {"options": {"avoid_features": features}}
+    if key == "google_maps":
+        return {"avoid": ["highways"] * motorways + ["tolls"] * tolls}
+    if key == "mapbox":
+        return {"exclude": ",".join(["motorway"] * motorways + ["toll"] * tolls)}
+    if key == "graphhopper":
+        rules = [{"if": "road_class == MOTORWAY", "multiply_by": "0"}] * motorways
+        rules += [{"if": "toll != NO", "multiply_by": "0"}] * tolls
+        return {"custom_model": {"priority": rules}, "ch_disable": True}
+    return {}

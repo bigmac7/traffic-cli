@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import logging
 import routingpy
@@ -86,8 +87,10 @@ class Config:
         logger.info("Config created successfully")
 
     def save(self):
-        """Writes the current state back to the disk."""
-        with open(self.config_file, "w") as f:
+        """Writes the current state back to the disk, readable only by the owner (it holds the API key)."""
+        fd = os.open(self.config_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.chmod(self.config_file, 0o600)  # O_CREAT's mode doesn't touch an existing file
+        with os.fdopen(fd, "w") as f:
             json.dump(self.config, f, indent=4)
 
     def set_config_value(self, key: str, value: str):
