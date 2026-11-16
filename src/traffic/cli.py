@@ -326,6 +326,9 @@ class DefaultCommandGroup(click.Group):
         super().__init__(*args, **kwargs)
 
     def parse_args(self, ctx, args):
+        # Click reads "-33.8,151.2" as options; a leading space (stripped in
+        # route_cmd) makes it a plain argument.
+        args = [" " + a if a.startswith("-") and parse_coords(a) else a for a in args]
         if not args:
             return super().parse_args(ctx, args)
         first_arg = args[0]
@@ -369,8 +372,9 @@ Examples:
 @click.option("--home", "-h", help="Starting postcode or address")
 @click.option("--destination", "-d", help="Ending postcode or address")
 @click.option("--country", "--cc", help="Country code bias for geocoding (e.g. 'gb', 'us', 'fr')")
-@click.option("--no-motorways", is_flag=True, help="Avoid motorways")
-@click.option("--include-tolls", is_flag=True, help="Include toll roads")
+@click.option("--no-motorways", is_flag=True, help="Avoid motorways (car only)")
+@click.option("--no-tolls", is_flag=True, help="Avoid toll roads (car only)")
+@click.option("--include-tolls", is_flag=True, hidden=True)  # no-op: tolls are included by default
 @click.option("--headless", "-q", "--quiet", is_flag=True, help="Headless mode: suppress tips and output clean duration")
 @click.option("--json", "json_output", is_flag=True, help="Output result in JSON format (Waybar compatible)")
 @click.option("--compact", "-c", is_flag=True, help="Output compact duration (e.g. '1h 15m')")
@@ -385,6 +389,7 @@ def route_cmd(
     destination,
     country,
     no_motorways,
+    no_tolls,
     include_tolls,
     headless,
     json_output,
@@ -394,6 +399,9 @@ def route_cmd(
     no_cache,
 ):
     """Calculates route and travel time between locations."""
+    locations = tuple(loc.strip() for loc in locations)
+    home = home and home.strip()
+    destination = destination and destination.strip()
     is_headless = headless or json_output or compact or raw
     geo.use_disk_cache = not no_cache
 
@@ -443,7 +451,7 @@ def route_cmd(
         click.echo(info)
 
     try:
-        router = Router(config, traffic=not no_traffic)
+        router = Router(config, traffic=not no_traffic, avoid_motorways=no_motorways, avoid_tolls=no_tolls)
         duration = router.get_travel_time(origin, dest, country_code=country)
         home_addr = getattr(getattr(router, "last_home_location", None), "address", origin)
         dest_addr = getattr(getattr(router, "last_destination_location", None), "address", dest)

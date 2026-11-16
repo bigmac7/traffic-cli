@@ -197,9 +197,16 @@ def test_coordinates_in_single_argument(env):
     assert out["error_kind"] == "usage"
 
 
-def test_negative_latitude_after_double_dash(env):
+@pytest.mark.parametrize("args", [
+    ("-33.8688,151.2093", "london"),
+    ("--", "-33.8688,151.2093", "london"),
+    ("--home", "-33.8688,151.2093", "london"),
+])
+def test_negative_latitude(env, args):
     env.configure()
-    code, out = run_json(env, "--", "-33.8688,151.2093", "london")
+    code, out = run_json(env, *args)
+    assert code == 0
+    assert out["origin"] == "-33.8688,151.2093"
     assert out["origin_coords"] == [-33.8688, 151.2093]
 
 
@@ -287,6 +294,20 @@ def test_geocode_cache_skips_misses_and_expired(env, monkeypatch):
     assert env.geocoded.count("london") == 2
 
 
+def test_country_name_lookup_is_cached_on_disk(env):
+    env.configure()
+    PLACES["france"] = Location("France", (46.6, 1.9), {"address": {"country_code": "fr"}})
+    try:
+        assert geo.normalize_country("France") == "fr"
+        geo._country_code_cache.clear()
+        env.new_process()
+        assert geo.normalize_country("france") == "fr"
+        assert env.geocoded == ["France"]
+    finally:
+        del PLACES["france"]
+        geo._country_code_cache.clear()
+
+
 # --- 5. config file permissions -----------------------------------------------
 
 
@@ -297,3 +318,44 @@ def test_config_is_private(env):
     config.config_file.chmod(0o644)
     config.save()
     assert stat.S_IMODE(config.config_file.stat().st_mode) == 0o600
+
+
+# --- avoid motorways / tolls ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "provider, expected",
+    [
+        ("ors", {"options": {"avoid_features": ["highways", "tollways"]}}),
+        ("google_maps", {"avoid": ["highways", "tolls"]}),
+        ("mapbox", {"exclude": "motorway,toll"}),
+        ("graphhopper", {
+            "custom_model": {"priority": [
+                {"if": "road_class == MOTORWAY", "multiply_by": "0"},
+                {"if": "toll != NO", "multiply_by": "0"},
+            ]},
+            "ch_disable": True,
+        }),
+    ],
+)
+def test_avoid_motorways_and_tolls(env, provider, expected):
+    env.configure(provider)
+    FakeClient.result = SimpleNamespace(duration=3000, raw=GOOGLE_RAW)
+    run_json(env, "--no-motorways", "--no-tolls", "birmingham", "london")
+    assert {k: FakeClient.calls[0][k] for k in expected} == expected
+
+
+def test_avoid_only_one(env):
+    env.configure("mapbox")
+    run_json(env, "--no-tolls", "birmingham", "london")
+    assert FakeClient.calls[0]["exclude"] == "toll"
+
+
+def test_avoid_ignored_off_car_and_include_tolls_is_noop(env):
+    env.configure("ors", profile="bike")
+    run_json(env, "--no-motorways", "birmingham", "london")
+    assert "options" not in FakeClient.calls[0]
+    env.configure("ors")
+    code, out = run_json(env, "--include-tolls", "birmingham", "london")
+    assert code == 0
+    assert "options" not in FakeClient.calls[1]

@@ -13,7 +13,7 @@ from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 from geopy.location import Location
 from traffic.config import Config
-from traffic.providers import resolve_provider
+from traffic.providers import avoid_kwargs, resolve_provider
 
 
 class TrafficError(ValueError):
@@ -151,10 +151,14 @@ def normalize_country(value):
     if key in _country_code_cache:
         return _country_code_cache[key]
 
+    disk_key = f"country|{key}"
+    hit = _load_disk_cache().get(disk_key) if use_disk_cache else None
     if key in _COUNTRY_ALIASES:
         code = _COUNTRY_ALIASES[key]
     elif len(key) == 2 and key.isalpha():
         code = key
+    elif hit and time.time() - hit["ts"] < CACHE_TTL_SECONDS:
+        code = hit["code"]
     else:
         # Full country name: ask Nominatim for its country code.
         code = None
@@ -164,13 +168,17 @@ def normalize_country(value):
                 code = (location.raw.get("address", {}) or {}).get("country_code")
         except Exception:
             code = None
+        if code and use_disk_cache:
+            cache = _load_disk_cache()
+            cache[disk_key] = {"code": code, "ts": time.time()}
+            _save_disk_cache(cache)
 
     _country_code_cache[key] = code
     return code
 
 
 class Router:
-    def __init__(self, config: Config, traffic: bool = True):
+    def __init__(self, config: Config, traffic: bool = True, avoid_motorways: bool = False, avoid_tolls: bool = False):
         self.config = config
         provider_name = config.provider_name
         profile = config.profile
@@ -192,6 +200,8 @@ class Router:
         self.profile = profiles[profile]
         # Live traffic only applies to driving.
         self.traffic = provider_info["traffic"] if traffic and profile == "car" else None
+        # Motorways and tolls only matter when driving (ORS rejects them for other profiles).
+        self.avoid = avoid_kwargs(self.provider, avoid_motorways, avoid_tolls) if profile == "car" else {}
         self.routing_client = config.router_class(api_key=config.api_key)
 
     def resolve_var(self, *vars):
@@ -251,7 +261,7 @@ class Router:
 
         home_coords = [home_loc.longitude, home_loc.latitude]
         destination_coords = [destination_loc.longitude, destination_loc.latitude]
-        kwargs = {"locations": [home_coords, destination_coords], "profile": self.profile}
+        kwargs = {"locations": [home_coords, destination_coords], "profile": self.profile, **self.avoid}
         traffic = self.traffic or {}
         if "profile" in traffic:
             kwargs["profile"] = traffic["profile"]

@@ -54,8 +54,14 @@ Configuration is stored at `~/.traffic/config.json`, readable only by you
 With the `car` profile, Mapbox (`driving-traffic`) and Google Maps (departure
 time *now*) return durations that include current traffic. OpenRouteService
 and GraphHopper return a free-flow estimate, and the default output says so.
-Pass `--no-traffic` to get the free-flow duration from any provider. Google
-bills traffic-aware requests at a higher rate than plain ones.
+Pass `--no-traffic` to get the free-flow duration from any provider.
+
+Google bills a request that returns traffic data (`duration_in_traffic`) as
+*Directions Advanced*: $10 per 1,000 requests after 5,000 free a month,
+against $5 per 1,000 after 10,000 free without traffic. `--no-traffic` keeps
+you on the cheaper rate. traffic-cli uses Google's legacy Directions API,
+which can no longer be enabled on new Google Cloud projects (since October
+2026); existing projects still work.
 
 ### Travel profiles
 
@@ -104,8 +110,7 @@ traffic 52.4862,-1.8904 51.5072,-0.1276
 traffic set home 52.4862,-1.8904
 ```
 
-If the first location starts with `-` (a southern latitude), put `--` before
-it so it isn't read as an option: `traffic -- -33.8688,151.2093 sydney airport`.
+Negative coordinates work as-is: `traffic -33.8688,151.2093 "sydney airport"`.
 
 ### Country bias
 
@@ -137,15 +142,10 @@ Other options:
 
 | Flag           | Effect                                                         |
 | -------------- | -------------------------------------------------------------- |
-| `--no-traffic` | Free-flow duration, even if the provider has live traffic      |
-| `--no-cache`   | Don't read or write the on-disk geocode cache                  |
-
-Routing options:
-
-| Flag              | Effect              |
-| ----------------- | ------------------- |
-| `--no-motorways`  | Avoid motorways     |
-| `--include-tolls` | Include toll roads  |
+| `--no-traffic`   | Free-flow duration, even if the provider has live traffic    |
+| `--no-motorways` | Avoid motorways (`car` profile only)                         |
+| `--no-tolls`     | Avoid toll roads (`car` profile only)                        |
+| `--no-cache`     | Don't read or write the on-disk geocode cache                |
 
 ### JSON output
 
@@ -161,7 +161,7 @@ Routing options:
 
 `duration_seconds` includes traffic when `traffic_aware` is true.
 `duration_free_flow_seconds` is present only when the provider reports it
-(currently Google Maps).
+(currently Google Maps; Mapbox's traffic profile has no free-flow figure).
 
 On failure the exit code is 1 and the object has `"class": "error"`, a
 human-readable `error`, and an `error_kind`: one of `config`, `usage`,
@@ -195,7 +195,8 @@ The `--json` output is designed to drop straight into a
 ## Notes
 
 - Geocoding uses OpenStreetMap's public Nominatim service. Requests are
-  rate-limited to ~1/second, and found locations are cached for 30 days in
+  rate-limited to ~1/second, and found locations (and country names given to
+  `--country`) are cached for 30 days in
   `$XDG_CACHE_HOME/traffic-cli/geocode.json` (default `~/.cache/...`), to
   respect its [usage policy](https://operations.osmfoundation.org/policies/nominatim/).
   Delete that file to clear the cache.
