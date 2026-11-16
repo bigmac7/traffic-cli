@@ -1,7 +1,9 @@
 import json
 import re
 import click
-from traffic.abstract.geo import Router, geocode, normalize_country
+from routingpy.exceptions import OverQueryLimit, RouterServerError, Timeout
+from traffic.abstract import geo
+from traffic.abstract.geo import Router, TrafficError, geocode, normalize_country, parse_coords
 from traffic.config import Config
 
 
@@ -10,11 +12,7 @@ def get_initialized_config(headless: bool = False):
     config = Config()
     if not config.provider_name:
         if headless:
-            click.echo(
-                "Error: Configuration not found or not initialized. Run `traffic init` first.",
-                err=True,
-            )
-            raise SystemExit(1)
+            raise TrafficError("Configuration not found or not initialized. Run `traffic init` first.", "config")
         click.echo("Configuration not found or not initialized.")
         provider_name = click.prompt(
             "Please enter provider name (e.g. ORS, Graphhopper)"
@@ -70,10 +68,20 @@ def format_duration_compact(seconds: float) -> str:
     return " ".join(parts)
 
 
-def format_error_message(exc: Exception) -> str:
+_ERROR_ADVICE = {
+    "auth": "(Check your API key using `traffic set api_key <key>`)",
+    "no_route": "(No drivable route found between these locations for the selected travel profile).",
+    "rate_limit": "(Rate limit exceeded. Please wait a moment before trying again).",
+}
+
+
+def format_error_message(exc: Exception) -> tuple:
     """
     Extracts a clean, human-readable error message from exceptions,
     parsing JSON payloads from routing APIs and filtering out raw JSON/metadata.
+
+    Returns ``(message, kind)``, where kind is one of ``config``, ``usage``,
+    ``geocode``, ``no_route``, ``auth``, ``rate_limit``, ``network``, ``unknown``.
     """
     status = getattr(exc, "status", None)
     raw_msg = getattr(exc, "message", str(exc))
@@ -116,15 +124,7 @@ def format_error_message(exc: Exception) -> str:
         if not extracted_msg and "error_message" in parsed_json:
             extracted_msg = str(parsed_json["error_message"])
 
-        # 4. TomTom 'detailedError'
-        if not extracted_msg and isinstance(parsed_json.get("detailedError"), dict):
-            extracted_msg = parsed_json["detailedError"].get("message")
-
-        # 5. TomTom 'errorText'
-        if not extracted_msg and "errorText" in parsed_json:
-            extracted_msg = str(parsed_json["errorText"])
-
-        # 6. GraphHopper 'hints'
+        # 4. GraphHopper 'hints'
         if not extracted_msg and isinstance(parsed_json.get("hints"), list) and parsed_json["hints"]:
             first_hint = parsed_json["hints"][0]
             if isinstance(first_hint, dict):
@@ -141,18 +141,20 @@ def format_error_message(exc: Exception) -> str:
 
     user_msg = extracted_msg.strip()
 
-    # Provide actionable context for common failure modes
+    # Classify, so callers can tell "retry later" from "this will never work"
     lower_msg = user_msg.lower()
-    if (
+    kind = getattr(exc, "kind", None)
+    if kind:
+        pass
+    elif (
         status in (401, 403)
         or "unauthorized" in lower_msg
         or "invalid token" in lower_msg
         or "invalid api key" in lower_msg
         or "not authorized" in lower_msg
     ):
-        return f"{user_msg} (Check your API key using `traffic set api_key <key>`)"
-
-    if (
+        kind = "auth"
+    elif (
         status == 404
         or "could not find point" in lower_msg
         or "cannot find point" in lower_msg
@@ -160,17 +162,22 @@ def format_error_message(exc: Exception) -> str:
         or "noroute" in lower_msg
         or "no route" in lower_msg
     ):
-        return f"{user_msg} (No drivable route found between these locations for the selected travel profile)."
-
-    if (
-        status == 429
+        kind = "no_route"
+    elif (
+        isinstance(exc, OverQueryLimit)
+        or status == 429
         or "rate limit" in lower_msg
         or "quota" in lower_msg
         or "over query limit" in lower_msg
     ):
-        return f"{user_msg} (Rate limit exceeded. Please wait a moment before trying again)."
+        kind = "rate_limit"
+    elif isinstance(exc, (Timeout, RouterServerError, OSError)):  # requests' errors subclass OSError
+        kind = "network"
+    else:
+        kind = "unknown"
 
-    return user_msg
+    advice = _ERROR_ADVICE.get(kind)
+    return (f"{user_msg} {advice}" if advice else user_msg), kind
 
 
 def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, country_code=None):
@@ -220,7 +227,8 @@ def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, coun
             if parts[0].strip() and parts[1].strip():
                 return parts[0].strip(), parts[1].strip(), None, None
 
-        if "," in text:
+        # A lone "lat,lon" is one location, not two.
+        if "," in text and not parse_coords(text):
             parts = text.split(",", 1)
             if parts[0].strip() and parts[1].strip():
                 return parts[0].strip(), parts[1].strip(), None, None
@@ -367,6 +375,8 @@ Examples:
 @click.option("--json", "json_output", is_flag=True, help="Output result in JSON format (Waybar compatible)")
 @click.option("--compact", "-c", is_flag=True, help="Output compact duration (e.g. '1h 15m')")
 @click.option("--raw", "--seconds", is_flag=True, help="Output raw duration in seconds")
+@click.option("--no-traffic", is_flag=True, help="Use the free-flow duration even if the provider has live traffic")
+@click.option("--no-cache", is_flag=True, help="Don't read or write the on-disk geocode cache")
 @click.pass_context
 def route_cmd(
     ctx,
@@ -380,10 +390,35 @@ def route_cmd(
     json_output,
     compact,
     raw,
+    no_traffic,
+    no_cache,
 ):
     """Calculates route and travel time between locations."""
     is_headless = headless or json_output or compact or raw
-    config = get_initialized_config(headless=is_headless)
+    geo.use_disk_cache = not no_cache
+
+    def fail(message, kind, tooltip, human):
+        if json_output:
+            click.echo(
+                json.dumps(
+                    {
+                        "text": "error",
+                        "alt": "traffic-error",
+                        "tooltip": tooltip,
+                        "class": "error",
+                        "error": message,
+                        "error_kind": kind,
+                    }
+                )
+            )
+        else:
+            click.echo(human, err=True)
+        ctx.exit(1)
+
+    try:
+        config = get_initialized_config(headless=is_headless)
+    except ValueError as e:  # missing, unreadable, or invalid config
+        fail(str(e), "config", f"Traffic error: {e}", f"Error: {e}")
 
     effective_country = country or getattr(config, "country", None)
     if effective_country and normalize_country(effective_country) is None and not is_headless:
@@ -402,27 +437,13 @@ def route_cmd(
     )
 
     if err:
-        if json_output:
-            click.echo(
-                json.dumps(
-                    {
-                        "text": "error",
-                        "alt": "traffic-error",
-                        "tooltip": err.splitlines()[0],
-                        "class": "error",
-                        "error": err,
-                    }
-                )
-            )
-        else:
-            click.echo(err, err=True)
-        ctx.exit(1)
+        fail(err, "usage", err.splitlines()[0], err)
 
     if info and not is_headless:
         click.echo(info)
 
     try:
-        router = Router(config)
+        router = Router(config, traffic=not no_traffic)
         duration = router.get_travel_time(origin, dest, country_code=country)
         home_addr = getattr(getattr(router, "last_home_location", None), "address", origin)
         dest_addr = getattr(getattr(router, "last_destination_location", None), "address", dest)
@@ -443,7 +464,16 @@ def route_cmd(
                 "origin_address": home_addr,
                 "destination": resolved_d,
                 "destination_address": dest_addr,
+                "provider": router.provider,
+                "traffic_aware": router.traffic_aware,
+                "origin_coords": [router.last_home_location.latitude, router.last_home_location.longitude],
+                "destination_coords": [
+                    router.last_destination_location.latitude,
+                    router.last_destination_location.longitude,
+                ],
             }
+            if router.free_flow_duration is not None:
+                output_data["duration_free_flow_seconds"] = int(router.free_flow_duration)
             click.echo(json.dumps(output_data))
         elif raw:
             click.echo(int(duration))
@@ -455,23 +485,11 @@ def route_cmd(
             click.echo(f"From: {resolved_h} ({home_addr})")
             click.echo(f"To:   {resolved_d} ({dest_addr})")
             click.echo(f"Travel time: {format_duration(duration)}")
+            if config.profile == "car" and not no_traffic and not router.traffic_aware:
+                click.echo(f"Note: no live traffic data from {router.provider}; this is a free-flow estimate.", err=True)
     except Exception as e:
-        error_msg = format_error_message(e)
-        if json_output:
-            click.echo(
-                json.dumps(
-                    {
-                        "text": "error",
-                        "alt": "traffic-error",
-                        "tooltip": f"Traffic error: {error_msg}",
-                        "class": "error",
-                        "error": error_msg,
-                    }
-                )
-            )
-        else:
-            click.echo(f"Error calculating travel time: {error_msg}", err=True)
-        ctx.exit(1)
+        error_msg, kind = format_error_message(e)
+        fail(error_msg, kind, f"Traffic error: {error_msg}", f"Error calculating travel time: {error_msg}")
 
 
 @traffic.command()

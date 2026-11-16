@@ -2,10 +2,27 @@
 Get all of the geometric info, such as postcode  -> lat/long, etc
 """
 
+import json
+import os
+import re
+import time
+from pathlib import Path
+
+from geopy.exc import GeocoderQuotaExceeded, GeocoderRateLimited
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
+from geopy.location import Location
 from traffic.config import Config
 from traffic.providers import resolve_provider
+
+
+class TrafficError(ValueError):
+    """An error whose machine-readable ``kind`` is known where it is raised."""
+
+    def __init__(self, message, kind):
+        super().__init__(message)
+        self.kind = kind
+
 
 # Nominatim's usage policy requires a descriptive user agent (app + contact)
 # and limits anonymous use to ~1 request/second. We honour both below.
@@ -19,24 +36,88 @@ _rate_limited_geocode = RateLimiter(geocoder.geocode, min_delay_seconds=1.0)
 # the same string. Keyed by (normalised query, country_codes).
 _geocode_cache: dict = {}
 
+# Hits are also persisted across invocations (misses are not), so periodic
+# callers like a Waybar module don't repeat the same Nominatim lookups.
+CACHE_FILE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "traffic-cli" / "geocode.json"
+CACHE_TTL_SECONDS = 30 * 86400
+use_disk_cache = True  # turned off by `--no-cache`
+_disk_cache = None
+
+
+def _load_disk_cache():
+    global _disk_cache
+    if _disk_cache is None:
+        try:
+            _disk_cache = json.loads(CACHE_FILE.read_text())
+        except (OSError, ValueError):
+            _disk_cache = {}
+    return _disk_cache
+
+
+def _save_disk_cache(cache):
+    now = time.time()
+    fresh = {k: v for k, v in cache.items() if now - v["ts"] < CACHE_TTL_SECONDS}
+    try:
+        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CACHE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(fresh))
+        os.replace(tmp, CACHE_FILE)  # atomic, so a concurrent reader never sees half a file
+    except OSError:
+        pass  # a cache that can't be written is just a slower run
+
 
 def geocode(query, country_codes=None):
-    """Geocode a query with in-process caching and Nominatim rate limiting.
+    """Geocode a query with caching and Nominatim rate limiting.
 
-    Returns the geopy ``Location`` (or ``None`` if not found). Results,
-    including misses, are cached per invocation to avoid redundant requests.
+    Returns the geopy ``Location`` (or ``None`` if not found). Results are
+    cached per invocation (including misses) and, unless ``use_disk_cache``
+    is off, hits are cached on disk for ``CACHE_TTL_SECONDS``.
     """
     if not query:
         return None
     key = (query.strip().lower(), country_codes)
     if key in _geocode_cache:
         return _geocode_cache[key]
+
+    disk_key = f"{country_codes or ''}|{key[0]}"
+    if use_disk_cache:
+        hit = _load_disk_cache().get(disk_key)
+        if hit and time.time() - hit["ts"] < CACHE_TTL_SECONDS:
+            location = Location(hit["address"], (hit["lat"], hit["lon"]), {"importance": hit["importance"]})
+            _geocode_cache[key] = location
+            return location
+
     if country_codes:
         location = _rate_limited_geocode(query, country_codes=country_codes)
     else:
         location = _rate_limited_geocode(query)
     _geocode_cache[key] = location
+
+    if location and use_disk_cache:
+        cache = _load_disk_cache()
+        cache[disk_key] = {
+            "address": location.address,
+            "lat": location.latitude,
+            "lon": location.longitude,
+            "importance": (location.raw or {}).get("importance", 0.5),
+            "ts": time.time(),
+        }
+        _save_disk_cache(cache)
     return location
+
+
+_COORDS_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$")
+
+
+def parse_coords(value):
+    """Return ``(lat, lon)`` if ``value`` is a ``lat,lon`` pair in decimal degrees, else ``None``."""
+    m = _COORDS_RE.match(value or "")
+    if not m:
+        return None
+    lat, lon = float(m.group(1)), float(m.group(2))
+    if -90 <= lat <= 90 and -180 <= lon <= 180:
+        return lat, lon
+    return None
 
 
 # Informal names / abbreviations that we resolve to an ISO 3166-1 alpha-2 code
@@ -89,25 +170,28 @@ def normalize_country(value):
 
 
 class Router:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, traffic: bool = True):
         self.config = config
         provider_name = config.provider_name
         profile = config.profile
         if not provider_name:
-            raise ValueError("Provider name not set in config.")
-        
-        _, provider_info = resolve_provider(provider_name)
+            raise TrafficError("Provider name not set in config.", "config")
+
+        self.provider, provider_info = resolve_provider(provider_name)
         if not provider_info:
-            raise ValueError(f"Provider '{provider_name}' is not supported.")
+            raise TrafficError(f"Provider '{provider_name}' is not supported.", "config")
 
         profiles = provider_info["profiles"]
         if profile not in profiles:
             valid = ", ".join(sorted(profiles))
-            raise ValueError(
+            raise TrafficError(
                 f"Profile '{profile}' is not supported for provider '{provider_name}'. "
-                f"Valid profiles are: {valid}. Set one with `traffic set profile <profile>`."
+                f"Valid profiles are: {valid}. Set one with `traffic set profile <profile>`.",
+                "config",
             )
         self.profile = profiles[profile]
+        # Live traffic only applies to driving.
+        self.traffic = provider_info["traffic"] if traffic and profile == "car" else None
         self.routing_client = config.router_class(api_key=config.api_key)
 
     def resolve_var(self, *vars):
@@ -124,7 +208,14 @@ class Router:
         return tuple(resolved)
 
     def _geocode_location(self, query: str, country_code: str = None):
-        """Geocodes a query string, applying country bias if configured."""
+        """Geocodes a query string, applying country bias if configured.
+
+        A ``lat,lon`` query is returned as-is without a geocoder call.
+        """
+        coords = parse_coords(query)
+        if coords:
+            return Location(query.strip(), coords, {})
+
         country = country_code or getattr(self.config, "country", None) or (self.config.config.get("country") if self.config.config else None)
         cc = normalize_country(country)
         if cc:
@@ -138,13 +229,19 @@ class Router:
         try:
             location = geocode(query)
         except Exception as e:
-            raise ValueError(f"Geocoding service error while searching for '{query}': {e}")
+            kind = "rate_limit" if isinstance(e, (GeocoderRateLimited, GeocoderQuotaExceeded)) else "network"
+            raise TrafficError(f"Geocoding service error while searching for '{query}': {e}", kind) from e
 
         if not location:
-            raise ValueError(f"Coordinates for '{query}' could not be found.")
+            raise TrafficError(f"Coordinates for '{query}' could not be found.", "geocode")
         return location
 
     def get_travel_time(self, home: str, destination: str, country_code: str = None):
+        """Return the travel time in seconds.
+
+        Also sets ``traffic_aware`` and ``free_flow_duration`` (``None`` unless
+        the provider reported a duration without traffic alongside it).
+        """
         home, destination = self.resolve_var(home, destination)
         home_loc = self._geocode_location(home, country_code=country_code)
         destination_loc = self._geocode_location(destination, country_code=country_code)
@@ -154,7 +251,23 @@ class Router:
 
         home_coords = [home_loc.longitude, home_loc.latitude]
         destination_coords = [destination_loc.longitude, destination_loc.latitude]
-        route = self.routing_client.directions(
-            locations=[home_coords, destination_coords], profile=self.profile
-        )
+        kwargs = {"locations": [home_coords, destination_coords], "profile": self.profile}
+        traffic = self.traffic or {}
+        if "profile" in traffic:
+            kwargs["profile"] = traffic["profile"]
+        if traffic.get("departure_time"):
+            kwargs["departure_time"] = int(time.time())
+
+        route = self.routing_client.directions(**kwargs)
+        self.traffic_aware = "profile" in traffic
+        self.free_flow_duration = None
+
+        if traffic.get("departure_time"):
+            # routingpy sums leg["duration"] (no traffic); Google puts the
+            # traffic-aware figure in leg["duration_in_traffic"].
+            legs = route.raw["routes"][0]["legs"]
+            if legs and all("duration_in_traffic" in leg for leg in legs):
+                self.traffic_aware = True
+                self.free_flow_duration = route.duration
+                return sum(leg["duration_in_traffic"]["value"] for leg in legs)
         return route.duration
