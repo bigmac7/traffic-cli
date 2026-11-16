@@ -293,7 +293,8 @@ class Router:
     def get_route_time(self, stops, country_code: str = None):
         """Return the total travel time in seconds, visiting ``stops`` in order.
 
-        Also sets ``last_leg_durations``, ``traffic_aware`` and
+        Also sets ``last_leg_durations`` (empty if the response had no
+        per-leg breakdown), ``traffic_aware`` and
         ``free_flow_duration`` (``None`` unless the provider reported a
         duration without traffic alongside it).
         """
@@ -333,11 +334,6 @@ class Router:
 
         if len(coords) == 2:
             legs = [float(duration)]
-        elif legs is None:
-            # Provider didn't return a breakdown: route each leg on its own.
-            legs = [
-                float(self.routing_client.directions(locations=list(pair), **kwargs).duration)
-                for pair in zip(coords, coords[1:])
-            ]
-        self.last_leg_durations = legs
+        # Every provider returns legs; re-routing each leg would multiply the cost.
+        self.last_leg_durations = legs or []
         return duration

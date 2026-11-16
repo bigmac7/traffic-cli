@@ -348,9 +348,9 @@ class DefaultCommandGroup(click.Group):
         super().__init__(*args, **kwargs)
 
     def parse_args(self, ctx, args):
-        # Click reads "-33.8,151.2" as options; a leading space (stripped in
-        # route_cmd) makes it a plain argument.
-        args = [" " + a if a.startswith("-") and parse_coords(a) else a for a in args]
+        # Click reads "-33.8,151.2" and "->" as options; a leading space
+        # (stripped in route_cmd) makes them plain arguments.
+        args = [" " + a if a == "->" or (a.startswith("-") and parse_coords(a)) else a for a in args]
         if not args:
             return super().parse_args(ctx, args)
         first_arg = args[0]
@@ -531,7 +531,10 @@ def route_cmd(
                     router.last_destination_location.latitude,
                     router.last_destination_location.longitude,
                 ],
-                "stops": [{"name": r, "address": a} for r, a in zip(resolved, addresses)],
+                "stops": [
+                    {"name": r, "address": loc.address, "coords": [loc.latitude, loc.longitude]}
+                    for r, loc in zip(resolved, router.last_locations)
+                ],
                 "legs": legs,
             }
             if router.free_flow_duration is not None:

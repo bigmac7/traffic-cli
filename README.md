@@ -94,7 +94,7 @@ traffic --home London --destination Paris
 
 ### Multiple stops
 
-Chain as many stops as you like with `to` (or `->`). They are visited in
+Chain as many stops as you like with `to` (or a quoted `"->"`). They are visited in
 order, and you get a per-leg breakdown plus the total for the whole trip:
 
 ```console
@@ -128,8 +128,8 @@ $ traffic --compact --legs home to school to work
 25m
 ```
 
-With `--json`, the output always includes a `stops` list (each stop and its
-resolved address) and a `legs` list:
+With `--json`, the output always includes a `stops` list (each stop's name,
+resolved address and `[lat, lon]` coords) and a `legs` list:
 
 ```json
 "legs": [
@@ -141,8 +141,12 @@ resolved address) and a `legs` list:
 The leg breakdown also goes in the tooltip. `--json --legs` replaces the
 total in `text` with the leg times, e.g. `12m → 25m`.
 
-Leg times come from the same single routing request when the provider returns
-them. If it doesn't, each leg is requested separately.
+Leg times come from the same single routing request. If a response has no
+per-leg breakdown, `legs` is empty and only the total is shown.
+
+Google returns no live traffic for routes with intermediate stops, so a
+multi-stop Google route is a free-flow estimate (`traffic_aware: false`).
+Mapbox includes traffic for up to 25 stops.
 
 ### Saved variables
 
