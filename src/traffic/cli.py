@@ -180,25 +180,56 @@ def format_error_message(exc: Exception) -> tuple:
     return (f"{user_msg} {advice}" if advice else user_msg), kind
 
 
-def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, country_code=None):
+def _split_on_delimiters(tokens):
     """
-    Resolves the origin (home) and destination from CLI options and positional arguments.
+    Splits tokens on every 'to' / '->' delimiter into a list of stops.
+    Returns None if there is no delimiter or any segment would be empty.
+    """
+    if not any(t.lower() == "to" or t == "->" for t in tokens):
+        return None
+    stops, current = [], []
+    for t in tokens:
+        if t.lower() == "to" or t == "->":
+            if not current:
+                return None
+            stops.append(" ".join(current))
+            current = []
+        else:
+            current.append(t)
+    if not current:
+        return None
+    stops.append(" ".join(current))
+    return stops
+
+
+def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, country_code=None, via=()):
+    """
+    Resolves the stops of a route (origin, any intermediate stops, destination) from CLI options
+    and positional arguments.
     Supports delimiters ('to', '->'), config variables, country biasing, and heuristic multi-word splitting.
-    Returns a tuple: (origin, destination, info_message, error_message).
+    Any number of stops can be chained with delimiters, e.g. 'a to b to c'.
+    Returns a tuple: (stops, info_message, error_message).
     """
+    stops, info, err = _resolve_stops(locations, home_opt, dest_opt, config, country_code)
+    if stops and via:
+        stops = [stops[0], *via, *stops[1:]]
+    return stops, info, err
+
+
+def _resolve_stops(locations, home_opt=None, dest_opt=None, config=None, country_code=None):
     vars_dict = config.config.get("vars", {}) if config and config.config else {}
     raw_cc = country_code or getattr(config, "country", None) or (config.config.get("country") if config and config.config else None)
     cc = normalize_country(raw_cc)
 
     # Case 1: Both options provided explicitly
     if home_opt and dest_opt:
-        return home_opt, dest_opt, None, None
+        return [home_opt, dest_opt], None, None
 
-    # Case 2: One option provided explicitly, positional args provide the other
+    # Case 2: One option provided explicitly, positional args provide the other(s)
     if home_opt and locations:
-        return home_opt, " ".join(locations), None, None
+        return [home_opt, *(_split_on_delimiters(locations) or [" ".join(locations)])], None, None
     if dest_opt and locations:
-        return " ".join(locations), dest_opt, None, None
+        return [*(_split_on_delimiters(locations) or [" ".join(locations)]), dest_opt], None, None
 
     # Case 3: No positional locations provided
     if not locations:
@@ -206,32 +237,34 @@ def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, coun
             "Error: Missing origin and destination.\n\n"
             "Usage:\n"
             "  traffic <origin> <destination>\n"
-            "  traffic <origin> to <destination>\n\n"
+            "  traffic <origin> to <destination>\n"
+            "  traffic <origin> to <stop> to <destination>\n\n"
             "Examples:\n"
             "  traffic california nevada\n"
             '  traffic "las vegas" california\n'
             "  traffic las vegas to california\n"
+            "  traffic home to school to work\n"
             "  traffic home work"
         )
-        return None, None, None, err
+        return None, None, err
 
     # Case 4: Single positional string passed (e.g. 'las vegas to california')
     if len(locations) == 1:
         text = locations[0].strip()
-        to_split = re.split(r"\s+to\s+", text, maxsplit=1, flags=re.IGNORECASE)
-        if len(to_split) == 2 and to_split[0].strip() and to_split[1].strip():
-            return to_split[0].strip(), to_split[1].strip(), None, None
+        to_split = [p.strip() for p in re.split(r"\s+to\s+", text, flags=re.IGNORECASE)]
+        if len(to_split) >= 2 and all(to_split):
+            return to_split, None, None
 
         if "->" in text:
-            parts = text.split("->", 1)
-            if parts[0].strip() and parts[1].strip():
-                return parts[0].strip(), parts[1].strip(), None, None
+            parts = [p.strip() for p in text.split("->")]
+            if all(parts):
+                return parts, None, None
 
         # A lone "lat,lon" is one location, not two.
         if "," in text and not parse_coords(text):
             parts = text.split(",", 1)
             if parts[0].strip() and parts[1].strip():
-                return parts[0].strip(), parts[1].strip(), None, None
+                return [parts[0].strip(), parts[1].strip()], None, None
 
         err = (
             f"Error: Could not determine both origin and destination from '{text}'.\n\n"
@@ -239,34 +272,23 @@ def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, coun
             f'  traffic "{text}" <destination>\n'
             f"  traffic {text} to <destination>"
         )
-        return None, None, None, err
+        return None, None, err
 
     # Case 5: Exactly 2 positional arguments
     if len(locations) == 2:
-        return locations[0], locations[1], None, None
+        return [locations[0], locations[1]], None, None
 
     # Case 6: 3 or more positional arguments
-    # Check for keyword delimiter 'to' or '->'
-    lower_tokens = [t.lower() for t in locations]
-    if "to" in lower_tokens:
-        idx = lower_tokens.index("to")
-        if 0 < idx < len(locations) - 1:
-            h = " ".join(locations[:idx])
-            d = " ".join(locations[idx + 1:])
-            return h, d, None, None
-
-    if "->" in locations:
-        idx = locations.index("->")
-        if 0 < idx < len(locations) - 1:
-            h = " ".join(locations[:idx])
-            d = " ".join(locations[idx + 1:])
-            return h, d, None, None
+    # Check for keyword delimiters 'to' or '->' (any number of stops)
+    split = _split_on_delimiters(locations)
+    if split:
+        return split, None, None
 
     # Check for saved variable boundaries in config (e.g. 'home las vegas')
     if locations[0] in vars_dict:
-        return locations[0], " ".join(locations[1:]), None, None
+        return [locations[0], " ".join(locations[1:])], None, None
     if locations[-1] in vars_dict:
-        return " ".join(locations[:-1]), locations[-1], None, None
+        return [" ".join(locations[:-1]), locations[-1]], None, None
 
     # Heuristic split testing using geocoding
     best_split = None
@@ -305,7 +327,7 @@ def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, coun
             f"Interpreting route as: '{h}' -> '{d}'\n"
             f"Tip: You can wrap multi-word locations in quotes (e.g. traffic \"{h}\" \"{d}\") or use 'to' (e.g. traffic {h} to {d}).\n"
         )
-        return h, d, info, None
+        return [h, d], info, None
 
     raw_query = " ".join(locations)
     err = (
@@ -315,7 +337,7 @@ def resolve_locations(locations, home_opt=None, dest_opt=None, config=None, coun
         "Or use 'to' as a separator:\n"
         f"  traffic {' '.join(locations[:2])} to {' '.join(locations[2:])}"
     )
-    return None, None, None, err
+    return None, None, err
 
 
 class DefaultCommandGroup(click.Group):
@@ -342,7 +364,7 @@ class DefaultCommandGroup(click.Group):
     def format_usage(self, ctx, formatter):
         formatter.write_usage(
             ctx.command_path,
-            "[OPTIONS] [ORIGIN] [DESTINATION] | COMMAND [ARGS]...",
+            "[OPTIONS] [ORIGIN] [to STOP]... [DESTINATION] | COMMAND [ARGS]...",
         )
 
 
@@ -357,9 +379,11 @@ Examples:
   traffic california nevada
   traffic "las vegas" california
   traffic las vegas to california
+  traffic home to school to work
   traffic home work
   traffic --country gb b46 cv7
   traffic --json home work
+  traffic --json --legs home to school to work
   traffic --headless --compact home work
   traffic --home London --destination Paris
 """
@@ -371,6 +395,7 @@ Examples:
 @click.argument("locations", nargs=-1)
 @click.option("--home", "-h", help="Starting postcode or address")
 @click.option("--destination", "-d", help="Ending postcode or address")
+@click.option("--via", "-v", multiple=True, help="Intermediate stop (repeatable, visited in order)")
 @click.option("--country", "--cc", help="Country code bias for geocoding (e.g. 'gb', 'us', 'fr')")
 @click.option("--no-motorways", is_flag=True, help="Avoid motorways (car only)")
 @click.option("--no-tolls", is_flag=True, help="Avoid toll roads (car only)")
@@ -381,12 +406,17 @@ Examples:
 @click.option("--raw", "--seconds", is_flag=True, help="Output raw duration in seconds")
 @click.option("--no-traffic", is_flag=True, help="Use the free-flow duration even if the provider has live traffic")
 @click.option("--no-cache", is_flag=True, help="Don't read or write the on-disk geocode cache")
+@click.option(
+    "--legs", "-l", "show_legs", is_flag=True,
+    help="Per-leg breakdown: one line per leg with --raw/--compact/--headless; leg times as the --json text",
+)
 @click.pass_context
 def route_cmd(
     ctx,
     locations,
     home,
     destination,
+    via,
     country,
     no_motorways,
     no_tolls,
@@ -397,6 +427,7 @@ def route_cmd(
     raw,
     no_traffic,
     no_cache,
+    show_legs,
 ):
     """Calculates route and travel time between locations."""
     locations = tuple(loc.strip() for loc in locations)
@@ -436,12 +467,13 @@ def route_cmd(
             err=True,
         )
 
-    origin, dest, info, err = resolve_locations(
+    stops, info, err = resolve_locations(
         locations=locations,
         home_opt=home,
         dest_opt=destination,
         config=config,
         country_code=country,
+        via=via,
     )
 
     if err:
@@ -452,18 +484,38 @@ def route_cmd(
 
     try:
         router = Router(config, traffic=not no_traffic, avoid_motorways=no_motorways, avoid_tolls=no_tolls)
-        duration = router.get_travel_time(origin, dest, country_code=country)
-        home_addr = getattr(getattr(router, "last_home_location", None), "address", origin)
-        dest_addr = getattr(getattr(router, "last_destination_location", None), "address", dest)
-        resolved_h, resolved_d = router.resolve_var(origin, dest)
+        duration = router.get_route_time(stops, country_code=country)
+        resolved = [router.resolve_var(stop) for stop in stops]
+        addresses = [loc.address for loc in router.last_locations]
+        resolved_h, resolved_d = resolved[0], resolved[-1]
+        home_addr, dest_addr = addresses[0], addresses[-1]
+        via_lines = [f"Via:  {r} ({a})" for r, a in zip(resolved[1:-1], addresses[1:-1])]
+        legs = [
+            {
+                "from": resolved[i],
+                "to": resolved[i + 1],
+                "duration_seconds": int(leg),
+                "formatted": format_duration(leg),
+                "compact": format_duration_compact(leg),
+            }
+            for i, leg in enumerate(router.last_leg_durations)
+        ]
+        breakdown_lines = [f"  {leg['from']} -> {leg['to']}: {leg['formatted']}" for leg in legs]
 
         if json_output:
             formatted = format_duration(duration)
             compact_fmt = format_duration_compact(duration)
+            tooltip_lines = [f"From: {resolved_h} ({home_addr})", *via_lines, f"To: {resolved_d} ({dest_addr})"]
+            if len(legs) > 1:
+                tooltip_lines += ["", *[f"{leg['from']} -> {leg['to']}: {leg['formatted']}" for leg in legs], ""]
+            tooltip_lines.append(f"Travel time: {formatted}")
+            text = compact_fmt
+            if show_legs and len(legs) > 1:
+                text = " → ".join(leg["compact"] for leg in legs)
             output_data = {
-                "text": compact_fmt,
+                "text": text,
                 "alt": "traffic",
-                "tooltip": f"From: {resolved_h} ({home_addr})\nTo: {resolved_d} ({dest_addr})\nTravel time: {formatted}",
+                "tooltip": "\n".join(tooltip_lines),
                 "class": "traffic",
                 "duration_seconds": int(duration),
                 "formatted": formatted,
@@ -479,19 +531,31 @@ def route_cmd(
                     router.last_destination_location.latitude,
                     router.last_destination_location.longitude,
                 ],
+                "stops": [{"name": r, "address": a} for r, a in zip(resolved, addresses)],
+                "legs": legs,
             }
             if router.free_flow_duration is not None:
                 output_data["duration_free_flow_seconds"] = int(router.free_flow_duration)
             click.echo(json.dumps(output_data))
         elif raw:
-            click.echo(int(duration))
+            for value in [leg["duration_seconds"] for leg in legs] if show_legs else [int(duration)]:
+                click.echo(value)
         elif compact:
-            click.echo(format_duration_compact(duration))
+            for value in [leg["compact"] for leg in legs] if show_legs else [format_duration_compact(duration)]:
+                click.echo(value)
         elif headless:
-            click.echo(format_duration(duration))
+            for value in [leg["formatted"] for leg in legs] if show_legs else [format_duration(duration)]:
+                click.echo(value)
         else:
             click.echo(f"From: {resolved_h} ({home_addr})")
+            for line in via_lines:
+                click.echo(line)
             click.echo(f"To:   {resolved_d} ({dest_addr})")
+            if len(legs) > 1:
+                click.echo("")
+                for line in breakdown_lines:
+                    click.echo(line)
+                click.echo("")
             click.echo(f"Travel time: {format_duration(duration)}")
             if config.profile == "car" and not no_traffic and not router.traffic_aware:
                 click.echo(f"Note: no live traffic data from {router.provider}; this is a free-flow estimate.", err=True)
